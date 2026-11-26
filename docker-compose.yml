@@ -1,0 +1,17 @@
+services:
+  tenant-api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${TENANT_API_PORT:-18400}:18400"
+    volumes:
+      - "${TENANT_BASE:-./data}:/data"
+      # needed only for the container sandbox endpoint; see SECURITY.md
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TENANT_BASE=/data
+      - TENANT_TENANTS_DIR=/data/tenants
+      - TENANT_API_HOST=0.0.0.0
+      - TENANT_API_PORT=18400
+      - SANDBOX_IMG=alpine:latest
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}

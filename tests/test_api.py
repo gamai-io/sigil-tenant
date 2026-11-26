@@ -1,0 +1,73 @@
+"""Persistence and pricing regressions; the HTTP surface is documented in README."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import pathlib
+import tempfile
+import unittest
+
+MODULE = pathlib.Path(__file__).resolve().parents[1] / "tenant_api.py"
+
+
+def load_module(base: str):
+    os.environ["TENANT_BASE"] = base
+    os.environ["TENANT_TENANTS_DIR"] = os.path.join(base, "tenants")
+    spec = importlib.util.spec_from_file_location("tenant_api_under_test", MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class State(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.base = self.td.name
+        self.m = load_module(self.base)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_migrate_adds_a_key_once(self):
+        self.m.save({"acme": {}})
+        self.m.migrate()
+        first = self.m.load()["acme"]["api_key"]
+        self.assertTrue(first)
+        self.m.migrate()
+        self.assertEqual(self.m.load()["acme"]["api_key"], first)
+
+    def test_bump_counts_per_endpoint(self):
+        self.m.save({"acme": {}})
+        self.m.bump("acme", "verify")
+        self.m.bump("acme", "verify")
+        self.m.bump("acme", "sandbox")
+        usage = self.m.load()["acme"]["usage"]
+        self.assertEqual(usage, {"verify": 2, "sandbox": 1})
+
+    def test_bump_unknown_tenant_is_a_noop(self):
+        self.m.save({})
+        self.m.bump("nobody", "verify")
+        self.assertEqual(self.m.load(), {})
+
+    def test_billing_uses_the_documented_prices(self):
+        self.assertEqual(self.m.PRICES["sandbox"], 0.02)
+        self.assertEqual(self.m.PRICES["verify"], 0.005)
+
+    def test_defaults_are_loopback(self):
+        self.assertEqual(self.m.HOST, "127.0.0.1")
+        self.assertEqual(self.m.FC_HOST, "127.0.0.1")
+        self.assertFalse(self.m.ALLOW_PRIVATE)
+
+
+class StateFile(unittest.TestCase):
+    def test_tenants_file_is_json_and_readable(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = load_module(td)
+            m.save({"x": {"api_key": "k"}})
+            data = json.loads(open(os.path.join(td, "tenants.json")).read())
+            self.assertEqual(data["x"]["api_key"], "k")
+
+
+if __name__ == "__main__":
+    unittest.main()

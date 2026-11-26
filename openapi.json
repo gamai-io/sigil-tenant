@@ -1,0 +1,1 @@
+{"openapi": "3.0.3", "info": {"title": "SIGIL Tenant API", "version": "4.0"}, "paths": {"/health": {"get": {}}, "/tenants": {"get": {}, "post": {}}, "/tenants/{t}": {"delete": {}}, "/t/{t}/receipts": {"get": {}}, "/t/{t}/chain/verify": {"get": {}}, "/t/{t}/verify": {"post": {}}, "/t/{t}/usage": {"get": {}}, "/t/{t}/billing": {"get": {}}, "/t/{t}/sandbox": {"post": {}}}}
