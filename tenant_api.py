@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json,os,subprocess,time,urllib.request,urllib.error,secrets
+import fcntl,json,os,re,subprocess,time,urllib.request,urllib.error,secrets
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 BASE=os.environ.get("TENANT_BASE", os.path.expanduser("~/.sigil-tenant"))
 TENANTS=os.environ.get("TENANT_TENANTS_DIR", os.path.join(os.path.dirname(BASE), "sigil-tenants"))
@@ -8,6 +8,10 @@ HOST=os.environ.get("TENANT_API_HOST","127.0.0.1"); PORT=int(os.environ.get("TEN
 ALLOW_PRIVATE=os.environ.get("TENANT_ALLOW_PRIVATE","0")=="1"
 FC_HOST=os.environ.get("FC_HOST","127.0.0.1"); FC_PORT=int(os.environ.get("FC_PORT","18500"))
 PRICES={"receipts":0.001,"chain_verify":0.001,"verify":0.005,"sandbox":0.02,"health":0.0}
+NAME_RE=re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+def safe_name(n):
+    n=str(n or "")
+    return bool(NAME_RE.match(n)) and ".." not in n and "/" not in n and "\\" not in n
 OPENAPI={"openapi":"3.0.3","info":{"title":"SIGIL Tenant API","version":"4.0"},
  "paths":{"/health":{"get":{}},"/tenants":{"get":{},"post":{}},"/tenants/{t}":{"delete":{}},
   "/t/{t}/receipts":{"get":{}},"/t/{t}/chain/verify":{"get":{}},"/t/{t}/verify":{"post":{}},
@@ -18,7 +22,20 @@ def rd(p,d=""):
 def load():
     try: return json.load(open(ST))
     except Exception: return {}
-def save(d): json.dump(d,open(ST,"w"),indent=2)
+def save(d):
+    tmp=ST+".tmp"
+    with open(tmp,"w") as f: json.dump(d,f,indent=2)
+    os.replace(tmp,ST)
+def mutate(fn):
+    """Serialise read-modify-write so two requests cannot lose a counter."""
+    os.makedirs(os.path.dirname(ST) or ".",exist_ok=True)
+    with open(ST+".lock","a+") as lk:
+        fcntl.flock(lk,fcntl.LOCK_EX)
+        d=load()
+        out=fn(d)
+        save(d)
+        fcntl.flock(lk,fcntl.LOCK_UN)
+        return out
 def migrate():
     d=load(); ch=False
     for t in d:
@@ -26,9 +43,11 @@ def migrate():
         d[t].setdefault("usage",{})
     if ch: save(d)
 def bump(n,ep):
-    d=load(); t=d.get(n)
-    if t is None: return
-    t.setdefault("usage",{}); t["usage"][ep]=t["usage"].get(ep,0)+1; save(d)
+    def _bump(d):
+        t=d.get(n)
+        if t is None: return
+        t.setdefault("usage",{}); t["usage"][ep]=t["usage"].get(ep,0)+1
+    mutate(_bump)
 def rtoken(n): return rd(os.path.join(TENANTS,n,"keys","control_token"))
 def proxy(port,path,method="GET",body=None,token=None,host="127.0.0.1",timeout=10,extra_headers=None):
     h={"Content-Type":"application/json"}
@@ -111,15 +130,21 @@ def ai_act_log(n,actor,action,tool=None,risk_class="minimal",human_oversight=Fal
     return rec["hash"]
 def ai_act_verify(n):
     import hashlib
-    lf=_ai_dir(n)+"/audit_trail.jsonl"
-    if not os.path.exists(lf): return {"ok":True,"records":0,"head":"GENESIS"}
+    d=_ai_dir(n); lf=d+"/audit_trail.jsonl"; cf=d+"/chain_head.json"
+    try: expected=json.load(open(cf)).get("head")
+    except Exception: expected=None
+    if not os.path.exists(lf):
+        if expected: return {"ok":False,"code":"truncated","records":0,"head":"GENESIS","expected":expected}
+        return {"ok":True,"records":0,"head":"GENESIS"}
     prev="GENESIS"; k=0
     for line in open(lf):
         line=line.strip()
         if not line: continue
         r=json.loads(line); st=r.pop("hash"); body=json.dumps(r,sort_keys=True,ensure_ascii=False)
-        if hashlib.sha256((prev+body).encode()).hexdigest()!=st or r.get("prev_hash")!=prev: return {"ok":False,"broken_at":k}
+        if hashlib.sha256((prev+body).encode()).hexdigest()!=st or r.get("prev_hash")!=prev: return {"ok":False,"code":"broken","broken_at":k}
         prev=st; k+=1
+    if expected and expected!=prev:
+        return {"ok":False,"code":"truncated","records":k,"head":prev,"expected":expected}
     return {"ok":True,"records":k,"head":prev}
 def ai_act_pack(n):
     lf=_ai_dir(n)+"/audit_trail.jsonl"; ev=[]; byr={}; bya={}
@@ -145,9 +170,14 @@ class H(BaseHTTPRequestHandler):
         return ALLOW_PRIVATE and (ip.startswith("10.") or ip.startswith("100.") or ip.startswith("192.168."))
     def _admin(self): return bool(rd(TF)) and self.headers.get("X-Admin-Token","")==rd(TF)
     def _tkey(self,n):
-        t=load().get(n); return bool(t) and self.headers.get("X-Api-Key","")==t.get("api_key","")
+        t=load().get(n) or {}
+        k=t.get("api_key","") or ""
+        h=self.headers.get("X-Api-Key","") or ""
+        return bool(k) and bool(h) and h==k
     def _body(self):
-        n=int(self.headers.get("Content-Length","0") or 0)
+        try: n=int(self.headers.get("Content-Length","0") or 0)
+        except ValueError: return {}
+        if n < 0 or n > 25_000_000: return {}
         try: return json.loads(self.rfile.read(n) or b"{}")
         except Exception: return {}
     def do_GET(self):
@@ -157,6 +187,7 @@ class H(BaseHTTPRequestHandler):
         if p=="/health": return self._j(200,{"ok":True,"tenants":len(load())})
         if p=="/pricing": return self._j(200,{"currency":"EUR","prices":PRICES})
         if p=="/tenants":
+            if not self._admin(): return self._j(401,{"error":"unauthorized"})
             out={}
             for n,t in load().items():
                 b=t["base"]; out[n]={"base":b,"chain":t.get("chain"),"has_key":bool(t.get("api_key")),"gate":health(b),"verify":health(b+1),"anchor":health(b+2)}
@@ -186,12 +217,17 @@ class H(BaseHTTPRequestHandler):
         if p=="/tenants":
             if not self._admin(): return self._j(401,{"error":"unauthorized"})
             req=self._body(); name=(req.get("name") or "").strip().lower().replace(" ","-")
-            if not name: return self._j(400,{"error":"name"})
+            if not name or not safe_name(name): return self._j(400,{"error":"name"})
             d=load()
             if name in d: return self._j(409,{"error":"exists","base":d[name]["base"],"chain":d[name].get("chain")})
-            base=int(req.get("base") or (18400+10*(len(d)+1)))
+            used={int(t.get("base") or 0) for t in d.values()}
+            candidate=18410
+            while candidate in used or any(candidate<=b<candidate+10 for b in used): candidate+=10
+            base=int(req.get("base") or candidate)
             try: subprocess.run(["bash",os.path.join(BD,"tenant_up.sh"),name,str(base)],timeout=45,capture_output=True)
             except Exception as e: return self._j(500,{"error":str(e)[:80]})
+            if not any(health(base+i) for i in (0,1,2)):
+                return self._j(500,{"error":"runtime did not start","base":base})
             key=secrets.token_urlsafe(24)
             d[name]={"base":base,"chain":name+"-1","created":int(time.time()),"api_key":key,"usage":{}}
             save(d)
@@ -233,7 +269,9 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._ip_ok(): return self._j(403,{"error":"ip"})
         if not self._admin(): return self._j(401,{"error":"unauthorized"})
-        n=self.path.rstrip("/").split("/")[-1]; d=load()
+        n=self.path.rstrip("/").split("/")[-1]
+        if not safe_name(n): return self._j(400,{"error":"name"})
+        d=load()
         if n not in d: return self._j(404,{"error":"no tenant"})
         rt=os.path.join(TENANTS,n)
         for f in ("gate.pid","verify.pid","anchor.pid"):

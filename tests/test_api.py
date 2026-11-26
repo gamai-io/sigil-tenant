@@ -60,6 +60,34 @@ class State(unittest.TestCase):
         self.assertFalse(self.m.ALLOW_PRIVATE)
 
 
+class Safety(unittest.TestCase):
+    def test_tenant_names_cannot_escape_the_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = load_module(td)
+            self.assertTrue(m.safe_name("acme-1"))
+            for bad in ("../etc", "a/b", "..", "A B"):
+                self.assertFalse(m.safe_name(bad), bad)
+
+    def test_a_truncated_audit_trail_is_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = load_module(td)
+            directory = m._ai_dir("acme")
+            m.ai_act_log("acme", "ops", "event", summary="one")
+            m.ai_act_log("acme", "ops", "event", summary="two")
+            path = os.path.join(directory, "audit_trail.jsonl")
+            lines = open(path).read().splitlines()
+            open(path, "w").write(lines[0] + "\n")       # delete the tail
+            result = m.ai_act_verify("acme")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "truncated")
+
+    def test_an_empty_api_key_does_not_match(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = load_module(td)
+            m.save({"acme": {"api_key": ""}})
+            self.assertFalse(bool(m.load()["acme"]["api_key"]))
+
+
 class StateFile(unittest.TestCase):
     def test_tenants_file_is_json_and_readable(self):
         with tempfile.TemporaryDirectory() as td:
