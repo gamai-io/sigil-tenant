@@ -2,7 +2,7 @@
  "openapi": "3.0.3",
  "info": {
   "title": "SIGIL Tenant API",
-  "version": "4.0.1"
+  "version": "4.0.3"
  },
  "paths": {
   "/health": {

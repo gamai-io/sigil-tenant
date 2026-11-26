@@ -188,7 +188,10 @@ class H(BaseHTTPRequestHandler):
         return ALLOW_PRIVATE and (ip.startswith("10.") or ip.startswith("100.") or ip.startswith("192.168."))
     def _admin(self): return bool(rd(TF)) and self.headers.get("X-Admin-Token","")==rd(TF)
     def _rate(self):
-        if rate_ok(self.client_address[0]): return True
+        parts=self.path.split("?")[0].strip("/").split("/")
+        tenant=parts[1] if len(parts)>1 and parts[0]=="t" else ""
+        key=("tenant:"+tenant) if tenant else ("ip:"+self.client_address[0])
+        if rate_ok(key): return True
         self.send_response(429); self.send_header("Retry-After","60")
         self.send_header("Content-Length","0"); self.end_headers()
         return False

@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.0.3 — 2026-11-26
+- Rate limiting is per tenant for `/t/...` (a botnet behind many addresses cannot
+  use one budget) and per source for the rest; 429 with `Retry-After: 60`.
+
+
 ## 4.0.1 — 2026-11-26
 - The AI Act chain compares the computed head with `chain_head.json`, so a
   truncated or deleted tail is `ok:false, code:"truncated"` (it used to report a

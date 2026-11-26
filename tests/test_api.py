@@ -96,11 +96,13 @@ class RateLimit(unittest.TestCase):
                 m = load_module(td)
             finally:
                 os.environ.pop("TENANT_RATE_PER_MIN", None)
-            self.assertTrue(m.rate_ok("1.2.3.4", now=1000))
-            self.assertTrue(m.rate_ok("1.2.3.4", now=1000))
-            self.assertFalse(m.rate_ok("1.2.3.4", now=1000))
-            self.assertTrue(m.rate_ok("1.2.3.4", now=1061))
-            self.assertTrue(m.rate_ok("5.6.7.8", now=1061))
+            self.assertTrue(m.rate_ok("ip:1.2.3.4", now=1000))
+            self.assertTrue(m.rate_ok("ip:1.2.3.4", now=1000))
+            self.assertFalse(m.rate_ok("ip:1.2.3.4", now=1000))
+            self.assertTrue(m.rate_ok("ip:5.6.7.8", now=1061))
+            self.assertTrue(m.rate_ok("tenant:acme", now=1061))
+            self.assertTrue(m.rate_ok("tenant:acme", now=1061))
+            self.assertFalse(m.rate_ok("tenant:acme", now=1061))
 
 
 class StateFile(unittest.TestCase):
