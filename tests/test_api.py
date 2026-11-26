@@ -88,6 +88,21 @@ class Safety(unittest.TestCase):
             self.assertFalse(bool(m.load()["acme"]["api_key"]))
 
 
+class RateLimit(unittest.TestCase):
+    def test_the_bucket_refuses_after_the_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["TENANT_RATE_PER_MIN"] = "2"
+            try:
+                m = load_module(td)
+            finally:
+                os.environ.pop("TENANT_RATE_PER_MIN", None)
+            self.assertTrue(m.rate_ok("1.2.3.4", now=1000))
+            self.assertTrue(m.rate_ok("1.2.3.4", now=1000))
+            self.assertFalse(m.rate_ok("1.2.3.4", now=1000))
+            self.assertTrue(m.rate_ok("1.2.3.4", now=1061))
+            self.assertTrue(m.rate_ok("5.6.7.8", now=1061))
+
+
 class StateFile(unittest.TestCase):
     def test_tenants_file_is_json_and_readable(self):
         with tempfile.TemporaryDirectory() as td:

@@ -60,14 +60,17 @@ Docker: `TENANT_BASE=./data docker compose up --build`.
 | `FC_HOST` / `FC_PORT` | `127.0.0.1:18500` | Firecracker/vsock endpoint for the sandbox |
 | `SHARD_HOST` / `SHARD_PORT` | `127.0.0.1:7150` | optional execution shard |
 | `SANDBOX_IMG` | `alpine:latest` | image used by the container sandbox |
+| `TENANT_RATE_PER_MIN` | `120` | per-source requests per minute; `0` disables the limit |
 
 ## What it is not
 
-- Not encrypted in transit: put it behind your TLS proxy.
+- Not encrypted in transit: put it behind your TLS proxy. The proxy client does
+  not follow redirects (a 30x would otherwise carry `X-SIGIL-Token` elsewhere).
 - Not a hardened sandbox: the container endpoint needs the Docker socket; a
   compromised API process owns the host.
-- Not a billing system: counters are integers in a JSON file, no invoices, no
-  Stripe integration beyond an unused environment variable.
+- Billing is a counter, not a ledger: `GET /t/{t}/invoice` turns usage counters
+  into a pending invoice. Stripe is optional and only used if `STRIPE_SECRET_KEY`
+  is set **and** the `stripe` package is installed; neither ships here.
 - API keys are stored in `tenants.json` as issued (file mode is your control);
   hashing them is on the list, not in the code.
 

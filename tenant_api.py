@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
-import fcntl,json,os,re,subprocess,time,urllib.request,urllib.error,secrets
+import fcntl,json,os,re,subprocess,threading,time,urllib.request,urllib.error,secrets
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 BASE=os.environ.get("TENANT_BASE", os.path.expanduser("~/.sigil-tenant"))
 TENANTS=os.environ.get("TENANT_TENANTS_DIR", os.path.join(os.path.dirname(BASE), "sigil-tenants"))
 BD=BASE; ST=os.path.join(BD,"tenants.json"); TF=os.path.join(BD,"admin.token"); FCF=os.path.join(BD,"fc.token")
 HOST=os.environ.get("TENANT_API_HOST","127.0.0.1"); PORT=int(os.environ.get("TENANT_API_PORT","18400"))
 ALLOW_PRIVATE=os.environ.get("TENANT_ALLOW_PRIVATE","0")=="1"
+RATE_PER_MIN=int(os.environ.get("TENANT_RATE_PER_MIN","120") or "0")
+_RATE={}
+_RATE_LOCK=threading.Lock()
+def rate_ok(key, now=None):
+    """Simple per-source token bucket; 0 disables the limit."""
+    if RATE_PER_MIN <= 0: return True
+    moment=time.time() if now is None else now
+    with _RATE_LOCK:
+        start,count=_RATE.get(key,(moment,0))
+        if moment-start >= 60:
+            start,count=moment,0
+        count+=1
+        _RATE[key]=(start,count)
+        return count <= RATE_PER_MIN
 FC_HOST=os.environ.get("FC_HOST","127.0.0.1"); FC_PORT=int(os.environ.get("FC_PORT","18500"))
 PRICES={"receipts":0.001,"chain_verify":0.001,"verify":0.005,"sandbox":0.02,"health":0.0}
 NAME_RE=re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -49,6 +63,10 @@ def bump(n,ep):
         t.setdefault("usage",{}); t["usage"][ep]=t["usage"].get(ep,0)+1
     mutate(_bump)
 def rtoken(n): return rd(os.path.join(TENANTS,n,"keys","control_token"))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+_NO_REDIRECT=urllib.request.build_opener(_NoRedirect())
 def proxy(port,path,method="GET",body=None,token=None,host="127.0.0.1",timeout=10,extra_headers=None):
     h={"Content-Type":"application/json"}
     if token: h["X-SIGIL-Token"]=token
@@ -56,7 +74,7 @@ def proxy(port,path,method="GET",body=None,token=None,host="127.0.0.1",timeout=1
     data=json.dumps(body).encode() if body is not None else None
     req=urllib.request.Request("http://%s:%d%s"%(host,port,path),data=data,method=method,headers=h)
     try:
-        with urllib.request.urlopen(req,timeout=timeout) as r: return r.status,json.loads(r.read() or b"{}")
+        with _NO_REDIRECT.open(req,timeout=timeout) as r: return r.status,json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         try: return e.code,json.loads(e.read() or b"{}")
         except Exception: return e.code,{"error":str(e)}
@@ -169,6 +187,11 @@ class H(BaseHTTPRequestHandler):
             return True
         return ALLOW_PRIVATE and (ip.startswith("10.") or ip.startswith("100.") or ip.startswith("192.168."))
     def _admin(self): return bool(rd(TF)) and self.headers.get("X-Admin-Token","")==rd(TF)
+    def _rate(self):
+        if rate_ok(self.client_address[0]): return True
+        self.send_response(429); self.send_header("Retry-After","60")
+        self.send_header("Content-Length","0"); self.end_headers()
+        return False
     def _tkey(self,n):
         t=load().get(n) or {}
         k=t.get("api_key","") or ""
@@ -182,6 +205,7 @@ class H(BaseHTTPRequestHandler):
         except Exception: return {}
     def do_GET(self):
         if not self._ip_ok(): return self._j(403,{"error":"ip"})
+        if not self._rate(): return
         p=self.path.split("?")[0]
         if p=="/openapi.json": return self._j(200,OPENAPI)
         if p=="/health": return self._j(200,{"ok":True,"tenants":len(load())})
@@ -213,6 +237,7 @@ class H(BaseHTTPRequestHandler):
         self._j(404,{"error":"not found"})
     def do_POST(self):
         if not self._ip_ok(): return self._j(403,{"error":"ip"})
+        if not self._rate(): return
         p=self.path.split("?")[0]
         if p=="/tenants":
             if not self._admin(): return self._j(401,{"error":"unauthorized"})
@@ -268,6 +293,7 @@ class H(BaseHTTPRequestHandler):
         self._j(404,{"error":"not found"})
     def do_DELETE(self):
         if not self._ip_ok(): return self._j(403,{"error":"ip"})
+        if not self._rate(): return
         if not self._admin(): return self._j(401,{"error":"unauthorized"})
         n=self.path.rstrip("/").split("/")[-1]
         if not safe_name(n): return self._j(400,{"error":"name"})
